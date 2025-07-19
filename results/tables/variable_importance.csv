@@ -1,0 +1,10 @@
+﻿Variable,MeanDecreaseAccuracy,MeanDecreaseGini
+b_pktTotalCount,12.5299690000000,23389.5145720000
+src_port,6.99200100000000,4579.22076600000
+srv_count,6.5000940000000,11123.66259800
+same_srv_rate,4.85327500000000,15.5494960000000
+dst_port,0,0.933261000000000
+service_errors,0,0
+status_errors,0,0
+f_pktTotalCount,0,0.278579000000000
+

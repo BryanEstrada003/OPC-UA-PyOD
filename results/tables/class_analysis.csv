@@ -1,0 +1,5 @@
+"","label","multi_label","count","percentage"
+"1","1","DoS",74012,68.76
+"2","0","Normal",33566,31.19
+"3","1","Impersonation",49,0.05
+"4","1","MITM",6,0.01
