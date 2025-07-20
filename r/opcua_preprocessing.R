@@ -749,8 +749,8 @@ report <- list(
   missing_values = sum(missing_values$Missing_Count),
   outliers_detected = sum(outlier_summary$Outlier_Count),
   high_correlations = nrow(high_cor_pairs),
-  preprocessing_applied = c("Normalization", "Outlier_Treatment", "Class_Balancing"),
-  best_dataset = evaluation_results[which.max(evaluation_results$F1_Score), "Dataset"]
+  preprocessing_applied = c("Normalization", "Outlier_Treatment", "Class_Balancing")
+  # Eliminado best_dataset ya que evaluation_results no existe
 )
 
 # Guardar reporte
@@ -777,9 +777,9 @@ cat("- Correlaciones altas:", report$high_correlations, "\n\n")
 cat("Técnicas de Preprocesamiento Aplicadas:\n")
 cat(paste("-", report$preprocessing_applied, collapse = "\n"), "\n\n")
 
-cat("Evaluación de Datasets:\n")
-print(evaluation_results)
-cat("\n")
+# cat("Evaluación de Datasets:\n")
+# print(evaluation_results)
+# cat("\n")
 
 cat("Mejor dataset según F1-Score:", report$best_dataset, "\n")
 sink()
