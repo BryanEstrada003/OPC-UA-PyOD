@@ -509,39 +509,67 @@ write.csv(class_analysis, file.path(output_dir, "tables", "class_analysis.csv"))
 # ===============================================================================
 
 cat("\n=== APLICANDO TÉCNICAS DE BALANCEO ===\n")
-# 
-# # Preparar datos para balanceo (solo variables numéricas + label)
+
+# Preparar datos para balanceo (solo variables numéricas + label)
 balance_data <- opcua_processed %>%
-select(all_of(vars_to_normalize), label)
-# 
-# # 11.1 SMOTE (Synthetic Minority Oversampling Technique)
-# cat("Aplicando SMOTE...\n")
-# 
-# set.seed(123)
-# smote_result <- SMOTE(label ~ ., data = balance_data, perc.over = 200, perc.under = 150)
-# 
-# cat("Distribución después de SMOTE:\n")
-# print(table(smote_result$label))
-# 
-# # 11.2 ROSE (Random Over-Sampling Examples)
-# cat("Aplicando ROSE...\n")
-# 
-# set.seed(123)
-# rose_result <- ROSE(label ~ ., data = balance_data, seed = 123)$data
-# 
-# cat("Distribución después de ROSE:\n")
-# print(table(rose_result$label))
+  select(all_of(vars_to_normalize), label)
+
+# 11.1 SMOTE (Synthetic Minority Oversampling Technique)
+cat("Aplicando SMOTE...\n")
+
+# Debido al desbalance extremo, aplicaremos SMOTE de forma más controlada.
+# Aumentaremos mucho las clases minoritarias y reduciremos la mayoritaria.
+# Nota: DMwR::SMOTE es para clasificación binaria. Usaremos smotefamily::SMOTE para multiclase.
+if(require("smotefamily")){
+  set.seed(123)
+  # Definir esquema de duplicación. Clases minoritarias (Impersonation, MITM) se aumentan más.
+  # El número de instancias debe ser >= 2 para que SMOTE funcione.
+  table_labels <- table(balance_data$label)
+  majority_class_name <- names(which.max(table_labels))
+  
+  # SMOTE requiere que todas las variables sean numéricas
+  smote_data_prep <- balance_data
+  smote_data_prep$label <- as.integer(as.factor(smote_data_prep$label)) - 1
+  
+  # Generar data sintética para clases minoritarias
+  smote_result <- smotefamily::SMOTE(
+    X = smote_data_prep[, -which(names(smote_data_prep) == "label")],
+    target = smote_data_prep$label,
+    K = 3, # Usar un K pequeño por las clases minoritarias
+    dup_size = 1 # Generar un set de datos sintético
+  )$data
+  
+  # Renombrar la columna de clase y convertirla de nuevo a factor
+  names(smote_result)[names(smote_result) == "class"] <- "label"
+  smote_result$label <- as.factor(levels(balance_data$label)[smote_result$label + 1])
+  
+  cat("Distribución después de SMOTE:\n")
+  print(table(smote_result$label))
+} else {
+  cat("Paquete smotefamily no disponible para SMOTE multiclase.\n")
+  smote_result <- NULL
+}
+
+# 11.2 ROSE (Random Over-Sampling Examples)
+cat("Aplicando ROSE...\n")
+
+set.seed(123)
+# ROSE puede manejar directamente el desbalance multiclase
+rose_result <- ROSE(label ~ ., data = balance_data, seed = 123)$data
+
+cat("Distribución después de ROSE:\n")
+print(table(rose_result$label))
 
 # 11.3 Undersampling
 cat("Aplicando Undersampling...\n")
 
-# Encontrar la clase minoritaria
-min_class_size <- min(table(balance_data$label))
+# Encontrar el tamaño de la segunda clase más pequeña para no eliminar demasiados datos
+second_smallest_class_size <- sort(table(balance_data$label))[2]
 
 set.seed(123)
 undersample_result <- balance_data %>%
   group_by(label) %>%
-  sample_n(min_class_size) %>%
+  sample_n(min(n(), second_smallest_class_size)) %>% # No reducir más allá de la 2da clase más pequeña
   ungroup()
 
 cat("Distribución después de Undersampling:\n")
@@ -675,67 +703,111 @@ saveRDS(preprocess_params,
 # ===============================================================================
 # 14. EVALUACIÓN COMPARATIVA DE DATASETS
 # ===============================================================================
-# 
-# cat("\n=== EVALUACIÓN COMPARATIVA ===\n")
-# 
-# # Función para evaluar un dataset
-# evaluate_dataset <- function(data, dataset_name) {
-#   set.seed(123)
-#   
-#   # División train/test
-#   train_index <- createDataPartition(data$label, p = 0.7, list = FALSE)
-#   train_data <- data[train_index, ]
-#   test_data <- data[-train_index, ]
-#   
-#   # Entrenar modelo Random Forest
-#   rf_model <- randomForest(label ~ ., data = train_data, ntree = 100)
-#   
-#   # Predicciones
-#   predictions <- predict(rf_model, test_data)
-#   
-#   # Métricas
-#   cm <- confusionMatrix(predictions, test_data$label)
-#   
-#   return(list(
-#     dataset = dataset_name,
-#     accuracy = cm$overall["Accuracy"],
-#     sensitivity = cm$byClass["Sensitivity"],
-#     specificity = cm$byClass["Specificity"],
-#     f1_score = cm$byClass["F1"]
-#   ))
-# }
-# 
-# # Evaluar diferentes datasets
-# datasets_to_evaluate <- list(
-#   "Original" = balance_data,
-#   # "SMOTE" = smote_result,
-#   # "ROSE" = rose_result,
-#   "Undersampled" = undersample_result
-# )
-# 
-# evaluation_results <- map_dfr(names(datasets_to_evaluate), function(name) {
-#   result <- evaluate_dataset(datasets_to_evaluate[[name]], name)
-#   data.frame(
-#     Dataset = result$dataset,
-#     Accuracy = result$accuracy,
-#     Sensitivity = result$sensitivity,
-#     Specificity = result$specificity,
-#     F1_Score = result$f1_score
-#   )
-# })
-# 
-# print(evaluation_results)
-# 
-# # Guardar resultados de evaluación
-# write.csv(evaluation_results, 
-#           file.path(output_dir, "tables", "dataset_evaluation_comparison.csv"), 
-#           row.names = FALSE)
+
+cat("\n=== EVALUACIÓN COMPARATIVA ===\n")
+
+# Función para evaluar un dataset con validación cruzada estratificada
+evaluate_dataset_cv <- function(data, dataset_name, k = 5) {
+  if (is.null(data) || nrow(data) == 0) {
+    cat("Dataset", dataset_name, "está vacío, saltando evaluación.\n")
+    return(NULL)
+  }
+  
+  cat("Evaluando dataset:", dataset_name, "con validación cruzada de", k, "folds...\n")
+  
+  set.seed(123)
+  # Crear folds estratificados
+  folds <- createFolds(data$label, k = k, list = TRUE, returnTrain = TRUE)
+  
+  # Almacenar métricas de cada fold
+  metrics <- list(
+    Accuracy = c(),
+    Balanced_Accuracy = c(),
+    Weighted_F1 = c(),
+    Macro_F1 = c()
+  )
+  
+  for (i in 1:k) {
+    # División train/test para el fold actual
+    train_indices <- folds[[i]]
+    test_indices <- setdiff(1:nrow(data), train_indices)
+    
+    train_data <- data[train_indices, ]
+    test_data <- data[test_indices, ]
+    
+    # Entrenar modelo Random Forest
+    rf_model <- randomForest(label ~ ., data = train_data, ntree = 100)
+    
+    # Predicciones
+    predictions <- predict(rf_model, test_data)
+    
+    # Matriz de confusión
+    cm <- confusionMatrix(predictions, test_data$label)
+    
+    # Calcular métricas
+    metrics$Accuracy[i] <- cm$overall["Accuracy"]
+    metrics$Balanced_Accuracy[i] <- cm$byClass["Balanced Accuracy"]
+    
+    # F1 Score ponderado y macro
+    f1_scores <- MLmetrics::F1_Score(y_true = test_data$label, y_pred = predictions, positive = levels(test_data$label))
+    metrics$Weighted_F1[i] <- sum(f1_scores * (table(test_data$label) / length(test_data$label)), na.rm = TRUE)
+    metrics$Macro_F1[i] <- mean(f1_scores, na.rm = TRUE)
+  }
+  
+  # Devolver promedio de métricas
+  return(data.frame(
+    Dataset = dataset_name,
+    Accuracy = mean(metrics$Accuracy),
+    Balanced_Accuracy = mean(metrics$Balanced_Accuracy),
+    Weighted_F1 = mean(metrics$Weighted_F1),
+    Macro_F1 = mean(metrics$Macro_F1)
+  ))
+}
+
+# Evaluar diferentes datasets
+datasets_to_evaluate <- list(
+  "Original" = balance_data,
+  "SMOTE" = smote_result,
+  "ROSE" = rose_result,
+  "Undersampled" = undersample_result
+)
+
+# Usar purrr::map_dfr para iterar y combinar resultados
+if(require("purrr")){
+  evaluation_results <- map_dfr(names(datasets_to_evaluate), function(name) {
+    evaluate_dataset_cv(datasets_to_evaluate[[name]], name)
+  })
+} else {
+  # Alternativa con lapply y do.call
+  evaluation_list <- lapply(names(datasets_to_evaluate), function(name) {
+    evaluate_dataset_cv(datasets_to_evaluate[[name]], name)
+  })
+  evaluation_results <- do.call(rbind, evaluation_list)
+}
+
+print(evaluation_results)
+
+# Guardar resultados de evaluación
+write.csv(evaluation_results, 
+          file.path(output_dir, "tables", "dataset_evaluation_comparison.csv"), 
+          row.names = FALSE)
 
 # ===============================================================================
 # 15. REPORTE FINAL
 # ===============================================================================
 
 cat("\n=== GENERANDO REPORTE FINAL ===\n")
+
+# Determinar el mejor dataset basado en el F1-Score Ponderado
+best_dataset_name <- ""
+if (exists("evaluation_results") && !is.null(evaluation_results) && nrow(evaluation_results) > 0) {
+  best_dataset_name <- evaluation_results %>%
+    arrange(desc(Weighted_F1)) %>%
+    slice(1) %>%
+    pull(Dataset)
+} else {
+  warning("No se encontraron resultados de evaluación para determinar el mejor dataset.")
+}
 
 # Crear reporte resumen
 report <- list(
@@ -749,8 +821,9 @@ report <- list(
   missing_values = sum(missing_values$Missing_Count),
   outliers_detected = sum(outlier_summary$Outlier_Count),
   high_correlations = nrow(high_cor_pairs),
-  preprocessing_applied = c("Normalization", "Outlier_Treatment", "Class_Balancing")
-  # Eliminado best_dataset ya que evaluation_results no existe
+  preprocessing_applied = c("Normalization", "Outlier_Treatment", "Class_Balancing (SMOTE, ROSE, Undersampling)"),
+  evaluation_summary = evaluation_results,
+  best_dataset = best_dataset_name
 )
 
 # Guardar reporte
@@ -777,11 +850,15 @@ cat("- Correlaciones altas:", report$high_correlations, "\n\n")
 cat("Técnicas de Preprocesamiento Aplicadas:\n")
 cat(paste("-", report$preprocessing_applied, collapse = "\n"), "\n\n")
 
-# cat("Evaluación de Datasets:\n")
-# print(evaluation_results)
-# cat("\n")
+cat("Evaluación Comparativa de Datasets (usando Random Forest con CV de 5 folds):\n")
+if (exists("evaluation_results") && !is.null(evaluation_results)) {
+  print(knitr::kable(evaluation_results, format = "pipe", digits = 4))
+} else {
+  cat("No se pudo generar la tabla de evaluación.\n")
+}
+cat("\n")
 
-cat("Mejor dataset según F1-Score:", report$best_dataset, "\n")
+cat("Mejor dataset según F1-Score Ponderado:", report$best_dataset, "\n")
 sink()
 
 cat("\n=== PREPROCESAMIENTO COMPLETADO ===\n")
