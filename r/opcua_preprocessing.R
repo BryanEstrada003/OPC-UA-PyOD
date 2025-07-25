@@ -113,7 +113,7 @@ if (any(!loaded)) {
 # ===============================================================================
 
 # Configurar directorio de trabajo usando variable
-directorio_trabajo <- "~/Escritorio/COMPUTER SCIENCE/2025-pao-i/metodología/OPC-UA-PyOD"
+directorio_trabajo <- "~/mai/OPC-UA-PyOD"
 
 # Establecer directorio de trabajo
 setwd(directorio_trabajo)
@@ -168,8 +168,14 @@ write.csv(summary_stats, file.path(output_dir, "tables", "summary_statistics.csv
 
 cat("\n=== ANÁLISIS DE VARIABLES CATEGÓRICAS ===\n")
 
-# Identificar variables categóricas
-categorical_vars <- c("src_ip", "dst_ip", "proto", "service", "label", "multi_label")
+# Identificar variables categóricas automáticamente
+categorical_vars <- names(opcua_data)[sapply(opcua_data, function(x) {
+  is.factor(x) | is.character(x) | (is.logical(x) & n_distinct(x) <= 10)
+})]
+if(!("label" %in% categorical_vars)) categorical_vars <- c(categorical_vars, "label")
+# Mostrar las variables categóricas identificadas
+cat("\nVariables categóricas identificadas:\n")
+print(categorical_vars)
 
 # Análisis de la variable objetivo (label)
 cat("\nDistribución de la variable objetivo 'label':\n")
@@ -386,10 +392,17 @@ ggsave(file.path(output_dir, "plots", "outliers_boxplots.png"),
 
 cat("\n=== ANÁLISIS DE CORRELACIONES ===\n")
 
-# Calcular matriz de correlación
+# Calcular matriz de correlación con manejo de NA
 cor_matrix <- opcua_data %>%
   select(all_of(numeric_vars)) %>%
-  cor(use = "complete.obs")
+  cor(use = "complete.obs")  # 'complete.obs' usa solo observaciones completas
+
+# Verificar y limpiar la matriz de correlación
+if(any(is.na(cor_matrix))) {
+  cat("\nAdvertencia: La matriz de correlación contiene NA. Revisar variables constantes.\n")
+  # Reemplazar NA por 0 (solo para visualización)
+  cor_matrix[is.na(cor_matrix)] <- 0
+}
 
 # Encontrar correlaciones altas (> 0.8)
 high_cor <- which(abs(cor_matrix) > 0.8 & abs(cor_matrix) < 1, arr.ind = TRUE)
@@ -400,10 +413,10 @@ high_cor_pairs <- data.frame(
 ) %>%
   arrange(desc(abs(Correlation)))
 
-cat("Pares de variables con correlación alta (>0.8):\n")
+cat("\nPares de variables con correlación alta (>0.8):\n")
 print(head(high_cor_pairs, 20))
 
-# Visualización de matriz de correlación
+# Visualización de matriz de correlación básica
 png(file.path(output_dir, "plots", "correlation_matrix.png"),
     width = 1200, height = 1000, res = 150)
 corrplot(cor_matrix, method = "color", type = "upper",
@@ -412,14 +425,50 @@ corrplot(cor_matrix, method = "color", type = "upper",
          mar = c(0,0,2,0))
 dev.off()
 
-# Heatmap más detallado con pheatmap
-png(file.path(output_dir, "plots", "correlation_heatmap_detailed.png"),
-    width = 1400, height = 1200, res = 150)
-pheatmap(cor_matrix, 
-         color = colorRampPalette(c("blue", "white", "red"))(100),
-         main = "Matriz de Correlación Detallada",
-         fontsize = 8)
-dev.off()
+# Heatmap detallado con pheatmap - Versión robusta
+heatmap_file <- file.path(output_dir, "plots", "correlation_heatmap_detailed.png")
+
+tryCatch({
+  # Asegurarnos de que la matriz no tenga NA/Inf
+  clean_cor_matrix <- cor_matrix
+  clean_cor_matrix[is.na(clean_cor_matrix) | is.infinite(clean_cor_matrix)] <- 0
+  
+  # Configurar parámetros del gráfico
+  pheatmap_plot <- pheatmap(clean_cor_matrix,
+                            color = colorRampPalette(c("#053061", "white", "#67001F"))(100),
+                            main = "Matriz de Correlación Detallada",
+                            fontsize_row = 8,
+                            fontsize_col = 8,
+                            angle_col = 45,
+                            display_numbers = ncol(clean_cor_matrix) <= 15,  # Mostrar números solo si hay pocas variables
+                            number_format = "%.2f",
+                            number_color = "black",
+                            cluster_rows = nrow(clean_cor_matrix) > 1,
+                            cluster_cols = ncol(clean_cor_matrix) > 1,
+                            silent = TRUE)  # No mostrar en la consola
+  
+  # Guardar con control de errores
+  png(heatmap_file, width = 1400, height = 1200, res = 150)
+  grid::grid.newpage()
+  grid::grid.draw(pheatmap_plot$gtable)
+  dev.off()
+  
+  cat("\nHeatmap de correlación guardado correctamente en:", heatmap_file, "\n")
+  
+}, error = function(e) {
+  if(dev.cur() > 1) dev.off()  # Cerrar dispositivo gráfico si está abierto
+  cat("\nError al generar el heatmap:", e$message, "\n")
+  
+  # Intentar guardar una versión simplificada como respaldo
+  try({
+    png(heatmap_file, width = 1400, height = 1200, res = 150)
+    corrplot(cor_matrix, method = "color", type = "full",
+             tl.col = "black", tl.srt = 45, tl.cex = 0.8,
+             title = "Matriz de Correlación (versión simplificada)")
+    dev.off()
+    cat("Se generó una versión simplificada del heatmap.\n")
+  }, silent = TRUE)
+})
 
 # ===============================================================================
 # 9. PREPROCESAMIENTO DE DATOS
@@ -517,39 +566,61 @@ balance_data <- opcua_processed %>%
 # 11.1 SMOTE (Synthetic Minority Oversampling Technique)
 cat("Aplicando SMOTE...\n")
 
-# Debido al desbalance extremo, aplicaremos SMOTE de forma más controlada.
-# Aumentaremos mucho las clases minoritarias y reduciremos la mayoritaria.
-# Nota: DMwR::SMOTE es para clasificación binaria. Usaremos smotefamily::SMOTE para multiclase.
 if(require("smotefamily")){
   set.seed(123)
-  # Definir esquema de duplicación. Clases minoritarias (Impersonation, MITM) se aumentan más.
-  # El número de instancias debe ser >= 2 para que SMOTE funcione.
-  table_labels <- table(balance_data$label)
-  majority_class_name <- names(which.max(table_labels))
+  # Guardar los niveles originales del factor
+  original_levels <- levels(balance_data$label)
   
   # SMOTE requiere que todas las variables sean numéricas
   smote_data_prep <- balance_data
-  smote_data_prep$label <- as.integer(as.factor(smote_data_prep$label)) - 1
+  smote_data_prep$label <- as.integer(smote_data_prep$label) - 1  # Convertir a 0-based index
+  
+  # Verificar que hay al menos 2 instancias por clase
+  table_labels <- table(smote_data_prep$label)
+  if(any(table_labels < 2)){
+    cat("\nAdvertencia: Algunas clases tienen menos de 2 instancias. SMOTE puede fallar.\n")
+    cat("Distribución actual:\n")
+    print(table(balance_data$label))
+  }
   
   # Generar data sintética para clases minoritarias
-  smote_result <- smotefamily::SMOTE(
-    X = smote_data_prep[, -which(names(smote_data_prep) == "label")],
-    target = smote_data_prep$label,
-    K = 3, # Usar un K pequeño por las clases minoritarias
-    dup_size = 1 # Generar un set de datos sintético
-  )$data
+  smote_result <- tryCatch({
+    smotefamily::SMOTE(
+      X = smote_data_prep[, -which(names(smote_data_prep) == "label")],
+      target = smote_data_prep$label,
+      K = min(3, nrow(smote_data_prep) - 1),  # Asegurar que K no sea mayor que el número de instancias
+      dup_size = 1
+    )$data
+  }, error = function(e) {
+    cat("\nError al aplicar SMOTE:", e$message, "\n")
+    return(NULL)
+  })
   
-  # Renombrar la columna de clase y convertirla de nuevo a factor
-  names(smote_result)[names(smote_result) == "class"] <- "label"
-  smote_result$label <- as.factor(levels(balance_data$label)[smote_result$label + 1])
-  
-  cat("Distribución después de SMOTE:\n")
-  print(table(smote_result$label))
+  if(!is.null(smote_result)) {
+    # Renombrar y convertir la columna de clase
+    names(smote_result)[names(smote_result) == "class"] <- "label"
+    
+    # Convertir de nuevo a factor usando los niveles originales
+    smote_result$label <- factor(smote_result$label, 
+                                 levels = 0:(length(original_levels)-1),
+                                 labels = original_levels)
+    
+    cat("\nDistribución después de SMOTE:\n")
+    print(table(smote_result$label))
+    
+    # Combinar con los datos originales
+    smote_result <- rbind(
+      balance_data,
+      smote_result %>% select(names(balance_data))
+    )
+  } else {
+    cat("\nNo se pudo aplicar SMOTE. Usando datos originales.\n")
+    smote_result <- balance_data
+  }
 } else {
   cat("Paquete smotefamily no disponible para SMOTE multiclase.\n")
-  smote_result <- NULL
+  smote_result <- balance_data
 }
-
 # 11.2 ROSE (Random Over-Sampling Examples)
 cat("Aplicando ROSE...\n")
 
@@ -681,20 +752,19 @@ write.csv(opcua_processed,
           file.path(output_dir, "processed_data", "opcua_processed_original.csv"), 
           row.names = FALSE)
 
-# # Dataset balanceado con SMOTE
-# write.csv(smote_result, 
-#           file.path(output_dir, "processed_data", "opcua_smote_balanced.csv"), 
-#           row.names = FALSE)
-# 
-# # Dataset balanceado con ROSE
-# write.csv(rose_result, 
-#           file.path(output_dir, "processed_data", "opcua_rose_balanced.csv"), 
-#           row.names = FALSE)
+# Dataset balanceado con SMOTE
+write.csv(smote_result, 
+         file.path(output_dir, "processed_data", "opcua_smote_balanced.csv"), 
+         row.names = FALSE)
+# Dataset balanceado con ROSE
+write.csv(rose_result, 
+         file.path(output_dir, "processed_data", "opcua_rose_balanced.csv"), 
+         row.names = FALSE)
 
 # Dataset con undersampling
 write.csv(undersample_result, 
-          file.path(output_dir, "processed_data", "opcua_undersampled.csv"), 
-          row.names = FALSE)
+         file.path(output_dir, "processed_data", "opcua_undersampled.csv"), 
+         row.names = FALSE)
 
 # Guardar parámetros de preprocesamiento
 saveRDS(preprocess_params, 
@@ -706,7 +776,7 @@ saveRDS(preprocess_params,
 
 cat("\n=== EVALUACIÓN COMPARATIVA ===\n")
 
-# Función para evaluar un dataset con validación cruzada estratificada
+# Función mejorada para evaluar datasets
 evaluate_dataset_cv <- function(data, dataset_name, k = 5) {
   if (is.null(data) || nrow(data) == 0) {
     cat("Dataset", dataset_name, "está vacío, saltando evaluación.\n")
@@ -717,80 +787,75 @@ evaluate_dataset_cv <- function(data, dataset_name, k = 5) {
   
   set.seed(123)
   # Crear folds estratificados
-  folds <- createFolds(data$label, k = k, list = TRUE, returnTrain = TRUE)
+  folds <- caret::createFolds(data$label, k = k, list = TRUE, returnTrain = TRUE)
   
-  # Almacenar métricas de cada fold
+  # Almacenar métricas
   metrics <- list(
-    Accuracy = c(),
-    Balanced_Accuracy = c(),
-    Weighted_F1 = c(),
-    Macro_F1 = c()
+    Accuracy = numeric(k),
+    Balanced_Accuracy = numeric(k),
+    Weighted_F1 = numeric(k),
+    Macro_F1 = numeric(k)
   )
   
   for (i in 1:k) {
-    # División train/test para el fold actual
     train_indices <- folds[[i]]
     test_indices <- setdiff(1:nrow(data), train_indices)
     
     train_data <- data[train_indices, ]
     test_data <- data[test_indices, ]
     
-    # Entrenar modelo Random Forest
-    rf_model <- randomForest(label ~ ., data = train_data, ntree = 100)
+    # Asegurar que los niveles de los factores coincidan
+    train_data$label <- factor(train_data$label)
+    test_data$label <- factor(test_data$label, levels = levels(train_data$label))
     
-    # Predicciones
+    # Entrenar modelo
+    rf_model <- randomForest(label ~ ., data = train_data, ntree = 100)
     predictions <- predict(rf_model, test_data)
     
     # Matriz de confusión
-    cm <- confusionMatrix(predictions, test_data$label)
+    cm <- caret::confusionMatrix(predictions, test_data$label)
     
-    # Calcular métricas
+    # Métricas base
     metrics$Accuracy[i] <- cm$overall["Accuracy"]
-    metrics$Balanced_Accuracy[i] <- cm$byClass["Balanced Accuracy"]
+    metrics$Balanced_Accuracy[i] <- mean(cm$byClass["Balanced Accuracy"], na.rm = TRUE)
     
-    # F1 Score ponderado y macro
-    f1_scores <- MLmetrics::F1_Score(y_true = test_data$label, y_pred = predictions, positive = levels(test_data$label))
-    metrics$Weighted_F1[i] <- sum(f1_scores * (table(test_data$label) / length(test_data$label)), na.rm = TRUE)
+    # Cálculo robusto de F1 scores
+    f1_scores <- sapply(levels(test_data$label), function(cls) {
+      MLmetrics::F1_Score(y_true = as.numeric(test_data$label == cls),
+                          y_pred = as.numeric(predictions == cls),
+                          positive = 1)
+    })
+    
+    # Pesos para F1 ponderado
+    class_weights <- table(test_data$label)/length(test_data$label)
+    
+    metrics$Weighted_F1[i] <- sum(f1_scores * class_weights, na.rm = TRUE)
     metrics$Macro_F1[i] <- mean(f1_scores, na.rm = TRUE)
   }
   
-  # Devolver promedio de métricas
-  return(data.frame(
+  # Resultado promedio
+  data.frame(
     Dataset = dataset_name,
-    Accuracy = mean(metrics$Accuracy),
-    Balanced_Accuracy = mean(metrics$Balanced_Accuracy),
-    Weighted_F1 = mean(metrics$Weighted_F1),
-    Macro_F1 = mean(metrics$Macro_F1)
-  ))
+    Accuracy = mean(metrics$Accuracy, na.rm = TRUE),
+    Balanced_Accuracy = mean(metrics$Balanced_Accuracy, na.rm = TRUE),
+    Weighted_F1 = mean(metrics$Weighted_F1, na.rm = TRUE),
+    Macro_F1 = mean(metrics$Macro_F1, na.rm = TRUE)
+  )
 }
 
-# Evaluar diferentes datasets
-datasets_to_evaluate <- list(
-  "Original" = balance_data,
-  "SMOTE" = smote_result,
-  "ROSE" = rose_result,
-  "Undersampled" = undersample_result
-)
-
-# Usar purrr::map_dfr para iterar y combinar resultados
-if(require("purrr")){
-  evaluation_results <- map_dfr(names(datasets_to_evaluate), function(name) {
+# Evaluación segura con manejo de errores
+evaluation_results <- purrr::map_dfr(names(datasets_to_evaluate), function(name) {
+  tryCatch({
     evaluate_dataset_cv(datasets_to_evaluate[[name]], name)
+  }, error = function(e) {
+    cat("Error evaluando", name, ":", e$message, "\n")
+    data.frame(Dataset = name, 
+               Accuracy = NA, 
+               Balanced_Accuracy = NA,
+               Weighted_F1 = NA,
+               Macro_F1 = NA)
   })
-} else {
-  # Alternativa con lapply y do.call
-  evaluation_list <- lapply(names(datasets_to_evaluate), function(name) {
-    evaluate_dataset_cv(datasets_to_evaluate[[name]], name)
-  })
-  evaluation_results <- do.call(rbind, evaluation_list)
-}
-
-print(evaluation_results)
-
-# Guardar resultados de evaluación
-write.csv(evaluation_results, 
-          file.path(output_dir, "tables", "dataset_evaluation_comparison.csv"), 
-          row.names = FALSE)
+})
 
 # ===============================================================================
 # 15. REPORTE FINAL
