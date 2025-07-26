@@ -113,7 +113,7 @@ if (any(!loaded)) {
 # ===============================================================================
 
 # Configurar directorio de trabajo usando variable
-directorio_trabajo <- "~/mai/OPC-UA-PyOD"
+directorio_trabajo <- "~/Escritorio/COMPUTER SCIENCE/2025-pao-i/metodología/OPC-UA-PyOD"
 
 # Establecer directorio de trabajo
 setwd(directorio_trabajo)
@@ -165,52 +165,351 @@ write.csv(summary_stats, file.path(output_dir, "tables", "summary_statistics.csv
 # ===============================================================================
 # 4. ANÁLISIS DE VARIABLES CATEGÓRICAS Y ETIQUETAS
 # ===============================================================================
+# Establecer tema global con fondo blanco
+# Definir tema personalizado con fondo blanco
+theme_custom <- function(base_size = 12) {
+  theme_minimal(base_size = base_size) +
+    theme(
+      plot.background = element_rect(fill = "white", color = NA),
+      panel.background = element_rect(fill = "white", color = NA),
+      panel.grid.major = element_line(color = "grey90"),
+      panel.grid.minor = element_blank(),
+      legend.background = element_rect(fill = "white", color = NA),
+      legend.box.background = element_rect(fill = "white", color = NA)
+    )
+}
+
 
 cat("\n=== ANÁLISIS DE VARIABLES CATEGÓRICAS ===\n")
-
 # Identificar variables categóricas automáticamente
 categorical_vars <- names(opcua_data)[sapply(opcua_data, function(x) {
   is.factor(x) | is.character(x) | (is.logical(x) & n_distinct(x) <= 10)
 })]
-if(!("label" %in% categorical_vars)) categorical_vars <- c(categorical_vars, "label")
-# Mostrar las variables categóricas identificadas
-cat("\nVariables categóricas identificadas:\n")
-print(categorical_vars)
 
-# Análisis de la variable objetivo (label)
-cat("\nDistribución de la variable objetivo 'label':\n")
-label_dist <- table(opcua_data$label)
-print(label_dist)
-print(prop.table(label_dist))
+# Excluir variables principales si existen
+vars_to_exclude <- c("label", "multi_label")
+analysis_vars <- setdiff(categorical_vars, vars_to_exclude)
 
-# Análisis de multi_label
-cat("\nDistribución de 'multi_label':\n")
-multi_label_dist <- table(opcua_data$multi_label)
-print(multi_label_dist)
-print(prop.table(multi_label_dist))
+# Mostrar las variables categóricas identificadas para análisis
+cat("\nVariables categóricas para análisis:\n")
+print(analysis_vars)
 
-# Visualización de distribución de clases
-p1 <- ggplot(opcua_data, aes(x = label, fill = label)) +
+# Función para crear gráficos de barras con porcentajes
+create_barplot <- function(data, var_name) {
+  # Calcular frecuencias y porcentajes
+  freq_data <- data %>%
+    group_by(!!sym(var_name)) %>%
+    summarise(count = n()) %>%
+    mutate(percentage = count/sum(count)*100)
+  
+  # Crear gráfico
+  ggplot(freq_data, aes(x = !!sym(var_name), y = count, fill = !!sym(var_name))) +
+    geom_bar(stat = "identity", color = "black") +
+    geom_text(aes(label = sprintf("%d\n(%.1f%%)", count, percentage)), 
+              vjust = -0.5, size = 3) +
+    labs(title = paste("Distribución de", var_name),
+         x = var_name, 
+         y = "Frecuencia") +
+    theme_custom() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1),
+          legend.position = "none") +
+    scale_fill_viridis_d()
+}
+
+# Función para crear gráficos de torta
+create_piechart <- function(data, var_name) {
+  freq_data <- data %>%
+    group_by(!!sym(var_name)) %>%
+    summarise(count = n()) %>%
+    mutate(percentage = count/sum(count)*100,
+           ypos = cumsum(percentage) - 0.5*percentage)
+  
+  ggplot(freq_data, aes(x = "", y = percentage, fill = !!sym(var_name))) +
+    geom_bar(stat = "identity", width = 1, color = "white") +
+    coord_polar("y", start = 0) +
+    geom_text(aes(y = ypos, label = sprintf("%.1f%%", percentage)), 
+              color = "white", size = 4) +
+    labs(title = paste("Distribución de", var_name),
+         fill = var_name) +
+    theme_custom() +
+    scale_fill_viridis_d()
+}
+
+# Análisis para cada variable categórica
+if (length(analysis_vars) > 0) {
+  cat("\nGenerando gráficos para variables categóricas...\n")
+  
+  # Crear directorio si no existe
+  if (!dir.exists(file.path(output_dir, "plots", "categorical_vars"))) {
+    dir.create(file.path(output_dir, "plots", "categorical_vars"), recursive = TRUE)
+  }
+  
+  # Generar gráficos para cada variable
+  for (var in analysis_vars) {
+    cat("Procesando variable:", var, "\n")
+    
+    # Gráfico de barras
+    p_bar <- create_barplot(opcua_data, var)
+    ggsave(file.path(output_dir, "plots", "categorical_vars", paste0(var, "_barplot.png")), 
+           p_bar, width = 8, height = 6, dpi = 300)
+    
+    # Gráfico de torta (solo si tiene pocas categorías)
+    if (n_distinct(opcua_data[[var]]) <= 10) {
+      p_pie <- create_piechart(opcua_data, var)
+      ggsave(file.path(output_dir, "plots", "categorical_vars", paste0(var, "_piechart.png")), 
+             p_pie, width = 8, height = 6, dpi = 300)
+    }
+    
+    # Gráfico de relación con la variable objetivo (si existe)
+    if ("label" %in% names(opcua_data)) {
+      p_rel <- ggplot(opcua_data, aes(x = !!sym(var), fill = factor(label))) +
+        geom_bar(position = "fill") +
+        labs(title = paste("Relación entre", var, "y label"),
+             x = var,
+             y = "Proporción",
+             fill = "Label") +
+        theme_custom() +
+        theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+        scale_fill_viridis_d()
+      
+      ggsave(file.path(output_dir, "plots", "categorical_vars", paste0(var, "_vs_label.png")), 
+             p_rel, width = 10, height = 6, dpi = 300)
+    }
+  }
+  
+  cat("\nGráficos guardados en:", file.path(output_dir, "plots", "categorical_vars"), "\n")
+} else {
+  cat("\nNo hay variables categóricas adicionales para analizar.\n")
+}
+
+# Análisis de variables principales (se mantiene igual)
+cat("\nAnálisis de variables principales:\n")
+
+# Versión manteniendo 0 y 1 como valores numéricos (pero discretos)
+p1 <- ggplot(opcua_data, aes(x = factor(label), fill = factor(label))) +  # Convertir a factor dentro del ggplot
   geom_bar(stat = "count", color = "black") +
   geom_text(stat = "count", aes(label = ..count..), vjust = -0.5) +
   labs(title = "Distribución de Clases (Label)", 
-       x = "Clase", y = "Frecuencia") +
-  theme_minimal() +
-  scale_fill_viridis_d()
+       x = "Clase", y = "Frecuencia",
+       fill = "Clase") +
+  theme_custom() +
+  scale_fill_viridis_d(option = "D", begin = 0.2, end = 0.8) +
+  scale_x_discrete(labels = c("0" = "Normal", "1" = "Anomalía"),  # Etiquetas personalizadas
+                   drop = FALSE) +
+  theme(legend.position = "top")
 
+# Visualización de distribución de multi-clases
 p2 <- ggplot(opcua_data, aes(x = multi_label, fill = multi_label)) +
   geom_bar(stat = "count", color = "black") +
   geom_text(stat = "count", aes(label = ..count..), vjust = -0.5, size = 3) +
   labs(title = "Distribución de Multi-Clases", 
        x = "Tipo de Ataque", y = "Frecuencia") +
-  theme_minimal() +
+  theme_custom() +
   theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
   scale_fill_viridis_d()
 
-# Guardar gráficos
+# Guardar gráficos principales
 ggsave(file.path(output_dir, "plots", "class_distribution.png"), 
        grid.arrange(p1, p2, ncol = 2), width = 12, height = 6, dpi = 300)
 
+# Crear directorio de tablas si no existe
+if (!dir.exists(file.path(output_dir, "tables"))) {
+  dir.create(file.path(output_dir, "tables"), recursive = TRUE)
+}
+
+# Función para obtener distribución de clases de una variable
+get_class_distribution <- function(data, var_name) {
+  if (var_name %in% names(data)) {
+    dist <- data %>%
+      group_by(!!sym(var_name)) %>%
+      summarise(Count = n()) %>%
+      mutate(Percentage = round(Count/sum(Count)*100, 2)) %>%
+      arrange(desc(Count))
+    
+    # Convertir a formato texto para la tabla
+    dist_text <- paste0(dist[[1]], ": ", dist$Count, " (", dist$Percentage, "%)", collapse = "\n")
+    classes <- paste(unique(dist[[1]]), collapse = ", ")
+    
+    return(data.frame(
+      Variable = var_name,
+      Clases = classes,
+      Distribución = dist_text,
+      stringsAsFactors = FALSE
+    ))
+  }
+  return(NULL)
+}
+
+# Excluir variables IP
+vars_to_exclude <- c("src_ip", "dst_ip")
+analysis_vars_exclude_ip <- setdiff(categorical_vars, vars_to_exclude)
+
+# Asegurarse de incluir label y multi_label si existen
+if ("label" %in% names(opcua_data) && !("label" %in% analysis_vars_exclude_ip)) {
+  analysis_vars_exclude_ip <- c(analysis_vars_exclude_ip, "label")
+}
+if ("multi_label" %in% names(opcua_data) && !("multi_label" %in% analysis_vars_exclude_ip)) {
+  analysis_vars_exclude_ip <- c(analysis_vars_exclude_ip, "multi_label")
+}
+
+# Generar tabla de distribución para cada variable
+dist_table <- do.call(rbind, lapply(analysis_vars_exclude_ip, function(var) {
+  get_class_distribution(opcua_data, var)
+}))
+
+# Formatear la tabla para mejor visualización
+formatted_table <- dist_table %>%
+  mutate(
+    Clases = ifelse(nchar(Clases) > 50, 
+                    paste0(substr(Clases, 1, 47), "..."), 
+                    Clases),
+    Distribución = gsub("\n", "<br>", Distribución)  # Para formato HTML
+  )
+
+# Guardar tabla en formato CSV
+write.csv(dist_table, 
+          file.path(output_dir, "tables", "class_distribution_summary.csv"), 
+          row.names = FALSE, fileEncoding = "UTF-8")
+
+
+# Función para analizar direcciones IP
+analyze_ips <- function(data, ip_var, top_n = 10) {
+  # Contar frecuencias y obtener top N
+  ip_counts <- data %>%
+    count(!!sym(ip_var)) %>%
+    arrange(desc(n)) %>%
+    head(top_n)
+  
+  # Gráfico de barras
+  p <- ggplot(ip_counts, aes(x = reorder(!!sym(ip_var), n), y = n)) +
+    geom_bar(stat = "identity", fill = "steelblue") +
+    geom_text(aes(label = n), hjust = -0.2, size = 3.5) +
+    coord_flip() +
+    labs(title = paste("Top", top_n, ip_var),
+         x = "Dirección IP",
+         y = "Frecuencia") +
+    theme_custom() +
+    theme(plot.title = element_text(hjust = 0.5))
+  
+  return(list(plot = p, table = ip_counts))
+}
+
+# Análisis para src_ip
+if ("src_ip" %in% names(opcua_data)) {
+  src_ip_analysis <- analyze_ips(opcua_data, "src_ip")
+  print(src_ip_analysis$plot)
+  ggsave(file.path(output_dir, "plots", "top_src_ips.png"), 
+         src_ip_analysis$plot, width = 10, height = 6, dpi = 300)
+  
+  # Guardar tabla
+  write.csv(src_ip_analysis$table,
+            file.path(output_dir, "tables", "top_src_ips.csv"),
+            row.names = FALSE)
+}
+
+# Análisis para dst_ip
+if ("dst_ip" %in% names(opcua_data)) {
+  dst_ip_analysis <- analyze_ips(opcua_data, "dst_ip")
+  print(dst_ip_analysis$plot)
+  ggsave(file.path(output_dir, "plots", "top_dst_ips.png"), 
+         dst_ip_analysis$plot, width = 10, height = 6, dpi = 300)
+  
+  # Guardar tabla
+  write.csv(dst_ip_analysis$table,
+            file.path(output_dir, "tables", "top_dst_ips.csv"),
+            row.names = FALSE)
+}
+
+
+# Función para extraer subred (/24) de una IP
+extract_subnet <- function(ip) {
+  sub("\\.[0-9]+$", ".0/24", ip)
+}
+
+# Análisis de subredes src_ip
+if ("src_ip" %in% names(opcua_data)) {
+  opcua_data$src_subnet <- sapply(opcua_data$src_ip, extract_subnet)
+  
+  subnet_counts <- opcua_data %>%
+    count(src_subnet) %>%
+    arrange(desc(n)) %>%
+    head(10)
+  
+  p_subnet <- ggplot(subnet_counts, aes(x = reorder(src_subnet, n), y = n)) +
+    geom_bar(stat = "identity", fill = "darkgreen") +
+    geom_text(aes(label = n), hjust = -0.2, size = 3.5) +
+    coord_flip() +
+    labs(title = "Top 10 Subredes de Origen (/24)",
+         x = "Subred",
+         y = "Frecuencia") +
+    theme_custom()
+  
+  print(p_subnet)
+  ggsave(file.path(output_dir, "plots", "top_src_subnets.png"), 
+         p_subnet, width = 10, height = 6, dpi = 300)
+  
+  # Guardar tabla
+  write.csv(subnet_counts,
+            file.path(output_dir, "tables", "top_src_subnets.csv"),
+            row.names = FALSE)
+}
+
+
+if (all(c("src_ip", "dst_ip") %in% names(opcua_data))) {
+  library(tidyr)
+  
+  # Contar pares únicos src-dst (limitar a top N para visualización)
+  ip_pairs <- opcua_data %>%
+    count(src_ip, dst_ip) %>%
+    arrange(desc(n)) %>%
+    head(100)  # Limitar a top 100 para visualización
+  
+  # Heatmap
+  p_heatmap <- ggplot(ip_pairs, aes(x = src_ip, y = dst_ip, fill = n)) +
+    geom_tile() +
+    scale_fill_viridis_c(option = "C", trans = "log10") +
+    labs(title = "Mapa de Calor de Comunicaciones IP",
+         x = "IP de Origen",
+         y = "IP de Destino",
+         fill = "Núm. Conexiones\n(log10)") +
+    theme_custom() +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1, size = 6),
+          axis.text.y = element_text(size = 6))
+  
+  print(p_heatmap)
+  ggsave(file.path(output_dir, "plots", "ip_communication_heatmap.png"), 
+         p_heatmap, width = 12, height = 10, dpi = 300)
+  
+  # Guardar tabla
+  write.csv(ip_pairs,
+            file.path(output_dir, "tables", "ip_communication_pairs.csv"),
+            row.names = FALSE)
+}
+
+
+# Función para generar estadísticas IP
+generate_ip_stats <- function(data, ip_var) {
+  data %>%
+    summarise(
+      Variable = ip_var,
+      IPs_Únicas = n_distinct(!!sym(ip_var)),
+      IP_Más_Frecuente = names(which.max(table(!!sym(ip_var)))),
+      Frecuencia_IP_Top = max(table(!!sym(ip_var))),
+      Porcentaje_IP_Top = round(max(table(!!sym(ip_var)))/n()*100, 2)
+    )
+}
+
+# Generar tabla resumen
+ip_stats <- bind_rows(
+  if ("src_ip" %in% names(opcua_data)) generate_ip_stats(opcua_data, "src_ip"),
+  if ("dst_ip" %in% names(opcua_data)) generate_ip_stats(opcua_data, "dst_ip")
+)
+
+# Mostrar y guardar tabla
+print(ip_stats)
+write.csv(ip_stats,
+          file.path(output_dir, "tables", "ip_address_statistics.csv"),
+          row.names = FALSE)
 # ===============================================================================
 # 5. ANÁLISIS DE VALORES FALTANTES
 # ===============================================================================
@@ -245,7 +544,7 @@ if(sum(missing_values$Missing_Count) > 0) {
     png(file.path(output_dir, "plots", "missing_values_pattern.png"), 
         width = 1200, height = 800, res = 150)
     print(naniar::gg_miss_var(opcua_data, show_pct = TRUE) +
-            theme_minimal() +
+            theme_custom() +
             scale_fill_manual(values = c('navyblue', 'red')))
     dev.off()
     cat("Gráfico de valores faltantes guardado en:", 
@@ -303,39 +602,6 @@ if(require("psych", quietly = TRUE)){
 } else {
   cat("\nEl paquete psych no está disponible\n")
 }
-
-# 4. Análisis con tidyverse (alternativa principal) ------------------------
-cat("\nCalculando estadísticas con dplyr/tidyr\n")
-
-numeric_summary <- opcua_data %>%
-  select(all_of(numeric_vars)) %>%
-  summarise(across(
-    everything(),
-    list(
-      mean = ~mean(., na.rm = TRUE),
-      sd = ~sd(., na.rm = TRUE),
-      min = ~min(., na.rm = TRUE),
-      q25 = ~quantile(., 0.25, na.rm = TRUE),
-      median = ~median(., na.rm = TRUE),
-      q75 = ~quantile(., 0.75, na.rm = TRUE),
-      max = ~max(., na.rm = TRUE),
-      na = ~sum(is.na(.))
-    )
-  )) %>%
-  pivot_longer(
-    everything(),
-    names_to = c("Variable", ".value"),
-    names_sep = "_"
-  ) %>%
-  mutate(across(where(is.numeric), ~round(., 4)))
-
-# Guardar resultados
-write.csv(numeric_summary,
-          file.path(output_dir, "tables", "numeric_summary.csv"),
-          row.names = FALSE)
-
-print(numeric_summary)
-
 # ===============================================================================
 # 7. DETECCIÓN DE OUTLIERS
 # ===============================================================================
@@ -370,7 +636,7 @@ create_boxplots <- function(data, vars, ncol = 3) {
     plots[[i]] <- ggplot(data, aes(y = .data[[var]])) +
       geom_boxplot(fill = "lightblue", alpha = 0.7) +
       labs(title = paste("Boxplot:", var), y = var) +
-      theme_minimal() +
+      theme_custom() +
       theme(axis.text.x = element_blank(),
             axis.ticks.x = element_blank())
   }
@@ -679,67 +945,6 @@ if(length(high_cor_vars) > 0) {
 } else {
   cat("No se encontraron variables con correlación > 0.9\n")
 }
-
-# 2. Selección basada en importancia con Random Forest --------------------
-
-# Verificar que hay variables para analizar
-if(length(vars_to_normalize) == 0) {
-  stop("No quedan variables para analizar después de eliminar las correlacionadas")
-}
-
-cat("Calculando importancia de variables con Random Forest...\n")
-
-# Crear fórmula dinámica
-rf_formula <- as.formula(paste("label ~", paste(vars_to_normalize, collapse = " + ")))
-
-set.seed(123)
-rf_model <- tryCatch({
-  randomForest(rf_formula, 
-               data = balance_data[c(vars_to_normalize, "label")], 
-               importance = TRUE, 
-               ntree = 100)
-}, error = function(e) {
-  cat("Error al entrenar Random Forest:", e$message, "\n")
-  NULL
-})
-
-if(!is.null(rf_model)) {
-  # Obtener importancia de variables
-  var_importance <- randomForest::importance(rf_model)
-  
-  # Convertir a dataframe ordenado
-  var_importance_df <- data.frame(
-    Variable = rownames(var_importance),
-    MeanDecreaseAccuracy = var_importance[, "MeanDecreaseAccuracy"],
-    MeanDecreaseGini = var_importance[, "MeanDecreaseGini"]
-  ) %>%
-    arrange(desc(MeanDecreaseAccuracy))
-  
-  print(head(var_importance_df, 15))
-  
-  # Visualizar importancia de variables
-  p_importance <- ggplot(head(var_importance_df, 15), 
-                         aes(x = reorder(Variable, MeanDecreaseAccuracy), 
-                             y = MeanDecreaseAccuracy)) +
-    geom_col(fill = "steelblue", alpha = 0.7) +
-    coord_flip() +
-    labs(title = "Importancia de Variables (Random Forest)",
-         x = "Variables", y = "Mean Decrease Accuracy") +
-    theme_minimal()
-  
-  ggsave(file.path(output_dir, "plots", "variable_importance.png"), 
-         p_importance, width = 10, height = 8, dpi = 300)
-  
-  # Guardar resultados de importancia
-  write.csv(var_importance_df,
-            file.path(output_dir, "tables", "variable_importance.csv"),
-            row.names = FALSE)
-  
-} else {
-  warning("No se pudo calcular la importancia de variables debido a errores en el modelo")
-}
-
-cat("\nSelección de características completada\n")
 
 # ===============================================================================
 # 13. GUARDAR DATASETS PROCESADOS
